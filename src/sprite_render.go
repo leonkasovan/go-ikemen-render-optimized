@@ -184,6 +184,199 @@ const (
 	BlendReverseSubtract
 )
 
+// ------------------------------------------------------------------
+// SFF / Sprite types (moved here to keep all type declarations grouped)
+
+// SffHeader represents the header of an SFF file
+type SffHeader struct {
+	Ver0, Ver1, Ver2, Ver3   byte
+	FirstSpriteHeaderOffset  uint32
+	FirstPaletteHeaderOffset uint32
+	NumberOfSprites          uint32
+	NumberOfPalettes         uint32
+}
+
+// PaletteList stores palettes used by SFFs
+type PaletteList struct {
+	palettes   [][]uint32
+	paletteMap []int
+	PalTable   map[[2]uint16]int
+	numcols    map[[2]uint16]int
+	PalTex     []Texture
+}
+
+// Sff is a lightweight representation of a loaded SFF file
+type Sff struct {
+	header  SffHeader
+	sprites map[[2]uint16]*Sprite
+	palList PaletteList
+	// This is the sffCache key
+	filename string
+}
+
+type Palette struct {
+	palList PaletteList
+}
+
+// Sprite stores texture and palette info for a single sprite
+type Sprite struct {
+	Pal      []uint32
+	Tex      Texture
+	Group    uint16 // Group index: valid range 0–65535
+	Number   uint16 // Sprite index: valid range 0–65535
+	Size     [2]uint16
+	Offset   [2]int16
+	palidx   int
+	rle      int
+	coldepth byte
+	paltemp  []uint32
+	PalTex   Texture
+}
+
+// ------------------------------------------------------------------
+// Font types
+
+// FntCharImage stores sprite and position
+type FntCharImage struct {
+	ofs, w uint16
+	img    []Sprite
+}
+
+// Fnt is a structure for basic font information
+type Fnt struct {
+	images    map[int32]map[rune]*FntCharImage
+	palettes  [][256]uint32
+	coldepth  []byte
+	ver, ver2 uint16
+	Type      string
+	BankType  string
+	Size      [2]uint16
+	Spacing   [2]int32
+	colors    int32
+	offset    [2]int32
+	paltex    Texture
+}
+
+// A simple SFF cache storing shallow copies
+type SffCacheEntry struct {
+	sffData  Sff
+	refCount int
+}
+
+var SffCache = map[string]*SffCacheEntry{}
+
+// PaletteList initializer
+func (pl *PaletteList) init() {
+	pl.palettes = nil
+	pl.paletteMap = nil
+	pl.PalTable = make(map[[2]uint16]int)
+	pl.numcols = make(map[[2]uint16]int)
+	pl.PalTex = nil
+}
+
+// newSff constructs a new, empty Sff structure with default palette entries
+func newSff() (s *Sff) {
+	s = &Sff{sprites: make(map[[2]uint16]*Sprite)}
+	s.palList.init()
+	for i := uint16(1); i <= uint16(sys_cfg_Config_PaletteMax); i++ {
+		s.palList.PalTable[[...]uint16{1, i}], _ = s.palList.NewPal()
+	}
+	return
+}
+
+// ------------------------------------------------------------------
+// Texture / Rendering types
+
+type TextureAtlas struct {
+	texture Texture
+	width   int32
+	height  int32
+	depth   int32
+	filter  bool
+	resize  bool
+	skyline *list.List //[][2]uint32
+}
+
+// ------------------------------------------------------------------
+// ShaderProgram_GL
+
+// (ShaderProgram_GL type moved to top types section)
+
+// ------------------------------------------------------------------
+// Texture_GL
+
+// (Texture_GL type moved to top types section)
+
+// ------------------------------------------------------------------
+// Renderer_GL and GLState
+
+type GLState struct {
+	depthTest           bool
+	depthMask           bool
+	invertFrontFace     bool
+	doubleSided         bool
+	blendEquation       BlendEquation
+	blendSrc            BlendFunc
+	blendDst            BlendFunc
+	useUV               bool
+	useNormal           bool
+	useTangent          bool
+	useVertColor        bool
+	useJoint0           bool
+	useJoint1           bool
+	useOutlineAttribute bool
+}
+
+// Shader program, texture and renderer types
+type ShaderProgram_GL struct {
+	program uint32
+	a       map[string]int32
+	u       map[string]int32
+	t       map[string]int
+}
+
+type Texture_GL struct {
+	width  int32
+	height int32
+	depth  int32
+	filter bool
+	handle uint32
+}
+
+type Renderer_GL struct {
+	fbo         uint32
+	fbo_texture uint32
+	// Normal rendering
+	rbo_depth uint32
+	// MSAA rendering
+	fbo_f         uint32
+	fbo_f_texture *Texture_GL
+	// Shadow Map
+	fbo_shadow              uint32
+	fbo_shadow_cube_texture uint32
+	fbo_env                 uint32
+	// Postprocessing FBOs
+	fbo_pp         []uint32
+	fbo_pp_texture []uint32
+	// Post-processing shaders
+	postVertBuffer   uint32
+	postShaderSelect []*ShaderProgram_GL
+	// Shader and vertex data for primitive rendering
+	spriteShader *ShaderProgram_GL
+	vertexBuffer uint32
+	// Shader and index data for 3D model rendering
+	shadowMapShader         *ShaderProgram_GL
+	modelShader             *ShaderProgram_GL
+	panoramaToCubeMapShader *ShaderProgram_GL
+	cubemapFilteringShader  *ShaderProgram_GL
+	modelVertexBuffer       [2]uint32
+	modelIndexBuffer        [2]uint32
+	vao                     uint32
+	enableModel             bool
+	enableShadow            bool
+	GLState
+}
+
 // Global Variable
 var sys_scrrect = [...]int32{0, 0, scr_width, scr_height}
 var sys_allPalFX = newPalFX()
@@ -196,28 +389,6 @@ var sys_Drawcall = 0
 var sys_gameFPS = float32(0.0)
 var sys_prevTimestamp = float64(0.0)
 var sys_absTickCountF = float32(0.0)
-
-// Vertex shader source code
-// var vertexShaderSource = `
-// #version 330 core
-// layout (location = 0) in vec3 aPos;
-
-// void main()
-// {
-//     gl_Position = vec4(aPos.x, aPos.y, aPos.z, 1.0);
-// }
-// ` + "\x00"
-
-// Fragment shader source code
-// var fragmentShaderSource = `
-// #version 330 core
-// out vec4 FragColor;
-
-// void main()
-// {
-//     FragColor = vec4(0.2, 0.8, 0.6, 1.0); // RGB color (teal)
-// }
-// ` + "\x00"
 
 func sys_GetTime() float64 {
 	return glfw.GetTime()
@@ -370,39 +541,6 @@ func compileShader(source string, shaderType uint32) (uint32, error) {
 
 	return shader, nil
 }
-
-// func createShaderProgram() uint32 {
-// 	vertexShader, err := compileShader(vertexShaderSource, gl.VERTEX_SHADER)
-// 	if err != nil {
-// 		panic(err)
-// 	}
-// 	defer gl.DeleteShader(vertexShader)
-
-// 	fragmentShader, err := compileShader(fragmentShaderSource, gl.FRAGMENT_SHADER)
-// 	if err != nil {
-// 		panic(err)
-// 	}
-// 	defer gl.DeleteShader(fragmentShader)
-
-// 	program := gl.CreateProgram()
-// 	gl.AttachShader(program, vertexShader)
-// 	gl.AttachShader(program, fragmentShader)
-// 	gl.LinkProgram(program)
-
-// 	var status int32
-// 	gl.GetProgramiv(program, gl.LINK_STATUS, &status)
-// 	if status == gl.FALSE {
-// 		var logLength int32
-// 		gl.GetProgramiv(program, gl.INFO_LOG_LENGTH, &logLength)
-
-// 		log := strings.Repeat("\x00", int(logLength+1))
-// 		gl.GetProgramInfoLog(program, logLength, nil, gl.Str(log))
-
-// 		panic(fmt.Errorf("failed to link program: %v", log))
-// 	}
-
-// 	return program
-// }
 
 func initRenderSpriteQuad(rp *RenderParams) {
 	if rp.vs < 0 {
@@ -1065,26 +1203,7 @@ func (s *Sprite) Draw(x, y, xscale, yscale float32, rxadd float32, rot Rotation,
 	RenderSprite(rp)
 }
 
-// FntCharImage stores sprite and position
-type FntCharImage struct {
-	ofs, w uint16
-	img    []Sprite
-}
-
-// Fnt is a interface for basic font information
-type Fnt struct {
-	images    map[int32]map[rune]*FntCharImage
-	palettes  [][256]uint32
-	coldepth  []byte
-	ver, ver2 uint16
-	Type      string
-	BankType  string
-	Size      [2]uint16
-	Spacing   [2]int32
-	colors    int32
-	offset    [2]int32
-	paltex    Texture
-}
+// (Font types moved to the top types section)
 
 // CharWidth returns the width that has a specified character
 func (f *Fnt) CharWidth(c rune, bt int32) int32 {
@@ -1535,15 +1654,7 @@ func (s *Sprite) GetPal(pl *PaletteList) []uint32 {
 	return pl.Get(int(s.palidx)) //pl.palettes[pl.paletteMap[int(s.palidx)]]
 }
 
-type TextureAtlas struct {
-	texture Texture
-	width   int32
-	height  int32
-	depth   int32
-	filter  bool
-	resize  bool
-	skyline *list.List //[][2]uint32
-}
+// (TextureAtlas type moved to top types section)
 
 func CreateTextureAtlas(width, height int32, depth int32, filter bool) *TextureAtlas {
 	ta := &TextureAtlas{width: width, height: height, texture: gfx.newTexture(width, height, depth, filter), depth: depth, filter: filter, skyline: list.New(), resize: false}
@@ -1649,86 +1760,10 @@ func (ta *TextureAtlas) Resize(width, height int32) {
 	return
 }
 
-// Or better yet, let's add proper diagnostics to your existing code:
-func main() {
-	window := initGLFW()
-	defer glfw.Terminate()
-	initOpenGL()
-
-	sff, err := loadSff("kfm.sff", true)
-	if err != nil {
-		panic(err)
-	}
-
-	key := [...]uint16{uint16(0), uint16(0)}
-	src, ok := sff.sprites[key]
-	if !ok || src == nil {
-		panic("Sprite Error")
-	}
-
-	gl.ClearColor(0.1, 0.1, 0.1, 1.0)
-	gfx.Init()
-
-	// Process any pending GPU tasks to ensure textures are uploaded
-	sys_runMainThreadTask()
-
-	fnt, err := loadFntV2("f-6x9.def", 9)
-	if err != nil {
-		panic(err)
-	}
-
-	if src.coldepth <= 8 && src.PalTex == nil {
-		src.PalTex = src.CachePalette(src.GetPal(&sff.palList))
-	}
-
-	// Re-check texture status after processing tasks
-	if src.Tex != nil {
-		fmt.Printf("Texture after task processing - valid: %t, Size: %dx%d\n",
-			src.Tex.IsValid(), src.Tex.GetWidth(), src.Tex.GetHeight())
-	}
-	if src.PalTex != nil {
-		fmt.Printf("Palette after task processing - valid: %t, Size: %dx%d\n",
-			src.PalTex.IsValid(), src.PalTex.GetWidth(), src.PalTex.GetHeight())
-	} else {
-		fmt.Printf("Palette is NIL\n")
-	}
-
-	for !window.ShouldClose() {
-		glfw.PollEvents()
-		gfx.BeginFrame(true) // true to clear the frame
-		src.Draw(100, 100, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
-		src.Draw(200, 200, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
-		src.Draw(300, 300, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
-		src.Draw(400, 400, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
-		fnt.DrawText("Tes Ikemen Go 100,100", 100, 100, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
-		fnt.DrawText("Tes Ikemen Go 0,200", 0, 200, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
-		fnt.DrawText("Tes Ikemen Go 300,0", 300, 0, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
-		// src.Draw(0, 300, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
-		// src.Draw(300, 0, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
-		// glfw.SwapInterval(1)
-		gfx.EndFrame()
-		window.SwapBuffers()
-		// gfx.Await()
-
-		// Process GPU tasks every frame
-		// sys_runMainThreadTask()
-	}
-	gfx.Close()
-}
-
 // ------------------------------------------------------------------
 // ShaderProgram_GL
 
-type ShaderProgram_GL struct {
-	// Program
-	program uint32
-	// Attributes
-	a map[string]int32
-	// Uniforms
-	u map[string]int32
-	// Texture_GL units
-	t map[string]int
-}
+// (ShaderProgram_GL type moved to top types section)
 
 func (r *Renderer_GL) newShaderProgram(vert, frag, geo, id string, crashWhenFail bool) (s *ShaderProgram_GL, err error) {
 	var vertObj, fragObj, geoObj, prog uint32
@@ -1846,13 +1881,7 @@ func (r *Renderer_GL) linkProgram(params ...uint32) (program uint32, err error) 
 // ------------------------------------------------------------------
 // Texture_GL
 
-type Texture_GL struct {
-	width  int32
-	height int32
-	depth  int32
-	filter bool
-	handle uint32
-}
+// (Texture_GL type moved to top types section)
 
 // Generate a new texture name
 func (r *Renderer_GL) newTexture(width, height, depth int32, filter bool) (t Texture) {
@@ -2031,56 +2060,8 @@ func (t *Texture_GL) MapTextureSamplingParam(i TextureSamplingParam) int32 {
 // ------------------------------------------------------------------
 // Renderer_GL
 
-type Renderer_GL struct {
-	fbo         uint32
-	fbo_texture uint32
-	// Normal rendering
-	rbo_depth uint32
-	// MSAA rendering
-	fbo_f         uint32
-	fbo_f_texture *Texture_GL
-	// Shadow Map
-	fbo_shadow              uint32
-	fbo_shadow_cube_texture uint32
-	fbo_env                 uint32
-	// Postprocessing FBOs
-	fbo_pp         []uint32
-	fbo_pp_texture []uint32
-	// Post-processing shaders
-	postVertBuffer   uint32
-	postShaderSelect []*ShaderProgram_GL
-	// Shader and vertex data for primitive rendering
-	spriteShader *ShaderProgram_GL
-	vertexBuffer uint32
-	// Shader and index data for 3D model rendering
-	shadowMapShader         *ShaderProgram_GL
-	modelShader             *ShaderProgram_GL
-	panoramaToCubeMapShader *ShaderProgram_GL
-	cubemapFilteringShader  *ShaderProgram_GL
-	modelVertexBuffer       [2]uint32
-	modelIndexBuffer        [2]uint32
-	vao                     uint32
-
-	enableModel  bool
-	enableShadow bool
-	GLState
-}
-type GLState struct {
-	depthTest           bool
-	depthMask           bool
-	invertFrontFace     bool
-	doubleSided         bool
-	blendEquation       BlendEquation
-	blendSrc            BlendFunc
-	blendDst            BlendFunc
-	useUV               bool
-	useNormal           bool
-	useTangent          bool
-	useVertColor        bool
-	useJoint0           bool
-	useJoint1           bool
-	useOutlineAttribute bool
-}
+// (Renderer_GL type moved to top types section)
+// (GLState type moved to the top types section)
 
 //go:embed shaders/sprite.vert.glsl
 var vertShader string
@@ -3393,13 +3374,7 @@ func OpenFile(filename string) (io.ReadSeekCloser, error) {
 	return f, nil // *os.File implements io.ReadSeekCloser
 }
 
-type SffHeader struct {
-	Ver0, Ver1, Ver2, Ver3   byte
-	FirstSpriteHeaderOffset  uint32
-	FirstPaletteHeaderOffset uint32
-	NumberOfSprites          uint32
-	NumberOfPalettes         uint32
-}
+// (SffHeader defined in the types section near the top)
 
 func (sh *SffHeader) Read(r io.Reader, lofs *uint32, tofs *uint32) error {
 	buf := make([]byte, 12)
@@ -3474,27 +3449,7 @@ func (sh *SffHeader) Read(r io.Reader, lofs *uint32, tofs *uint32) error {
 	return nil
 }
 
-// A simple SFF cache storing shallow copies
-type SffCacheEntry struct {
-	sffData  Sff
-	refCount int
-}
-
-var SffCache = map[string]*SffCacheEntry{}
-
-type Sprite struct {
-	Pal      []uint32
-	Tex      Texture
-	Group    uint16 // Group index: valid range 0–65535
-	Number   uint16 // Sprite index: valid range 0–65535
-	Size     [2]uint16
-	Offset   [2]int16
-	palidx   int
-	rle      int
-	coldepth byte
-	paltemp  []uint32
-	PalTex   Texture
-}
+// (SFF cache / palette initialization functions moved to the top types area)
 
 func (s *Sprite) isBlank() bool {
 	return s.Tex == nil || s.Size[0] == 0 || s.Size[1] == 0
@@ -4167,38 +4122,75 @@ func loadSff(filename string, char bool) (*Sff, error) {
 	return s, nil
 }
 
-type PaletteList struct {
-	palettes   [][]uint32
-	paletteMap []int
-	PalTable   map[[2]uint16]int
-	numcols    map[[2]uint16]int
-	PalTex     []Texture
-}
+// (types PaletteList, Sff and Palette were moved up to the "Types" section near the top)
 
-func (pl *PaletteList) init() {
-	pl.palettes = nil
-	pl.paletteMap = nil
-	pl.PalTable = make(map[[2]uint16]int)
-	pl.numcols = make(map[[2]uint16]int)
-	pl.PalTex = nil
-}
+// Or better yet, let's add proper diagnostics to your existing code:
+func main() {
+	window := initGLFW()
+	defer glfw.Terminate()
+	initOpenGL()
 
-type Sff struct {
-	header  SffHeader
-	sprites map[[2]uint16]*Sprite
-	palList PaletteList
-	// This is the sffCache key
-	filename string
-}
-type Palette struct {
-	palList PaletteList
-}
+	var max_texture_size int32
+	gl.GetIntegerv(gl.MAX_TEXTURE_SIZE, &max_texture_size)
+	fmt.Printf("Maximum texture size: %d x %d\n", max_texture_size, max_texture_size)
 
-func newSff() (s *Sff) {
-	s = &Sff{sprites: make(map[[2]uint16]*Sprite)}
-	s.palList.init()
-	for i := uint16(1); i <= uint16(sys_cfg_Config_PaletteMax); i++ {
-		s.palList.PalTable[[...]uint16{1, i}], _ = s.palList.NewPal()
+	sff, err := loadSff("kfm.sff", true)
+	if err != nil {
+		panic(err)
 	}
-	return
+
+	key := [...]uint16{uint16(0), uint16(0)}
+	src, ok := sff.sprites[key]
+	if !ok || src == nil {
+		panic("Sprite Error")
+	}
+
+	gl.ClearColor(0.1, 0.1, 0.1, 1.0)
+	gfx.Init()
+
+	// Process any pending GPU tasks to ensure textures are uploaded
+	sys_runMainThreadTask()
+
+	fnt, err := loadFntV2("f-6x9.def", 9)
+	if err != nil {
+		panic(err)
+	}
+
+	if src.coldepth <= 8 && src.PalTex == nil {
+		src.PalTex = src.CachePalette(src.GetPal(&sff.palList))
+	}
+
+	// Re-check texture status after processing tasks
+	if src.Tex != nil {
+		fmt.Printf("Texture after task processing - valid: %t, Size: %dx%d\n",
+			src.Tex.IsValid(), src.Tex.GetWidth(), src.Tex.GetHeight())
+	}
+	if src.PalTex != nil {
+		fmt.Printf("Palette after task processing - valid: %t, Size: %dx%d\n",
+			src.PalTex.IsValid(), src.PalTex.GetWidth(), src.PalTex.GetHeight())
+	} else {
+		fmt.Printf("Palette is NIL\n")
+	}
+
+	for !window.ShouldClose() {
+		glfw.PollEvents()
+		gfx.BeginFrame(true) // true to clear the frame
+		src.Draw(100, 100, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
+		src.Draw(200, 200, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
+		src.Draw(300, 300, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
+		src.Draw(400, 400, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
+		fnt.DrawText("Tes Ikemen Go 100,100", 100, 100, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		fnt.DrawText("Tes Ikemen Go 0,200", 0, 200, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		fnt.DrawText("Tes Ikemen Go 300,0", 300, 0, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		// src.Draw(0, 300, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
+		// src.Draw(300, 0, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
+		// glfw.SwapInterval(1)
+		gfx.EndFrame()
+		window.SwapBuffers()
+		// gfx.Await()
+
+		// Process GPU tasks every frame
+		// sys_runMainThreadTask()
+	}
+	gfx.Close()
 }
