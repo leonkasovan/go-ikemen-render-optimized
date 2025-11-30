@@ -1317,7 +1317,6 @@ func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation
 	// not existing characters treated as space
 	for i, c := range txt {
 		if c != ' ' && f.images[bt][c] == nil {
-			//txt = strings.Replace(txt, string(c), " ", -1)
 			txt = txt[:i] + string(' ') + txt[i+1:]
 		}
 	}
@@ -1348,7 +1347,7 @@ func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation
 
 	var pal []uint32
 	if len(f.palettes) != 0 {
-		pal = f.palettes[bank][:] //palfx.getFxPal(f.palettes[bank][:], false)
+		pal = f.palettes[bank][:]
 	}
 
 	f.paltex = nil
@@ -4630,6 +4629,8 @@ func main() {
 		fmt.Printf("Palette is NIL\n")
 	}
 
+	glfw.SwapInterval(1)
+
 	for !window.ShouldClose() {
 		glfw.PollEvents()
 		gfx.BeginFrame(true) // true to clear the frame
@@ -4637,12 +4638,10 @@ func main() {
 		src.Draw(200, 200, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
 		src.Draw(300, 300, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
 		src.Draw(400, 400, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
-		fnt.DrawText("Tes Ikemen Go 100,100", 100, 100, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
-		fnt.DrawText("Tes Ikemen Go 0,200", 0, 200, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
-		fnt.DrawText("Tes Ikemen Go 300,0", 300, 0, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
-		// src.Draw(0, 300, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
-		// src.Draw(300, 0, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
-		// glfw.SwapInterval(1)
+		fnt.DrawText("Test DrawText Ikemen Go 100,100", 100, 100, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		fnt.DrawText("Test DrawText Ikemen Go 200,200", 200, 200, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		fnt.DrawText("Test DrawText Ikemen Go 300,300", 300, 300, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		fnt.DrawText("Test DrawText Ikemen Go 400,400", 400, 400, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
 		gfx.EndFrame()
 		window.SwapBuffers()
 		// gfx.Await()
