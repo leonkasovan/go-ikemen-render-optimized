@@ -167,6 +167,7 @@ type RenderParams struct {
 	xOffset        float32
 	yOffset        float32
 	uv             [4]float32 // Optional atlas UV rect u1,v1,u2,v2
+	projection     mgl.Mat4
 }
 
 type BlendFunc int
@@ -262,6 +263,17 @@ type Fnt struct {
 	colors    int32
 	offset    [2]int32
 	paltex    Texture
+}
+
+type glyphDrawInfo struct {
+	x    float32
+	y    float32
+	xscl float32
+	yscl float32
+	c    rune
+	bank int32
+	bt   int32
+	pal  []uint32
 }
 
 // A simple SFF cache storing shallow copies
@@ -397,9 +409,32 @@ var sys_nDrawcall = 0
 var sys_Drawcall = 0
 
 // for avg. FPS calculations
-var sys_gameFPS = float32(0.0)
+var sys_gameFPS = float64(0.0)
 var sys_prevTimestamp = float64(0.0)
-var sys_absTickCountF = float32(0.0)
+var sys_absTickCountF = float64(0.0)
+
+// Add to global variables
+var textVertexBuffer uint32
+var textVertexData []float32
+
+// Initialize in gfx.Init() or similar
+func initTextBuffers() {
+	gl.GenBuffers(1, &textVertexBuffer)
+	textVertexData = make([]float32, 0, 1024) // Pre-allocate space for vertices
+}
+
+func updateFPS() {
+	currentTime := sys_GetTime()
+	deltaTime := currentTime - sys_prevTimestamp
+
+	if deltaTime >= 1 {
+		sys_gameFPS = sys_absTickCountF / deltaTime / 2
+		sys_absTickCountF = 0
+		sys_prevTimestamp = currentTime
+	}
+
+	sys_absTickCountF++
+}
 
 func sys_GetTime() float64 {
 	return glfw.GetTime()
@@ -1259,49 +1294,258 @@ func (f *Fnt) getCharSpr(c rune, bank, bt int32) *Sprite {
 
 	return &fci.img[0]
 }
-func (f *Fnt) drawChar(
-	x, y,
-	xscl, yscl float32,
-	bank, bt int32,
-	c rune, pal []uint32,
-	rp RenderParams,
-) float32 {
-	if c == ' ' {
-		return float32(f.Size[0]) * xscl
+
+// True batch rendering implementation
+func (f *Fnt) drawChars(glyphs []glyphDrawInfo, rot Rotation, window *[4]int32, palfx *PalFX, rp RenderParams) {
+	if len(glyphs) == 0 {
+		return
 	}
 
-	spr := f.getCharSpr(c, bank, bt)
-	if spr == nil || spr.Tex == nil {
-		return 0
+	// Group glyphs by texture (font atlas)
+	textureGroups := make(map[Texture][]glyphDrawInfo)
+	for _, g := range glyphs {
+		spr := f.getCharSpr(g.c, g.bank, g.bt)
+		if spr == nil || spr.Tex == nil {
+			continue
+		}
+		textureGroups[spr.Tex] = append(textureGroups[spr.Tex], g)
 	}
 
-	// In case of mismatched color depth between bank palette and the sprite's own palette,
-	// Mugen 1.1 uses the latter, ignoring the bank
-	if len(f.palettes) != 0 && len(f.coldepth) > int(bank) &&
-		f.images[bt][c].img[0].coldepth != 32 &&
-		f.coldepth[bank] != f.images[bt][c].img[0].coldepth {
-		pal = f.images[bt][c].img[0].Pal[:] //palfx.getFxPal(f.images[bt][c].img[0].Pal[:], false)
+	// For each texture group, render all characters using the standard RenderSprite
+	for tex, texGlyphs := range textureGroups {
+		for _, g := range texGlyphs {
+			spr := f.getCharSpr(g.c, g.bank, g.bt)
+			if spr == nil {
+				continue
+			}
+
+			// Create render params for this character
+			charRP := RenderParams{
+				tex:            tex,
+				paltex:         f.paltex,
+				size:           spr.Size,
+				x:              -g.x * sys_widthScale,
+				y:              -g.y * sys_heightScale,
+				tile:           notiling,
+				xts:            g.xscl * sys_widthScale,
+				xbs:            g.xscl * sys_widthScale,
+				ys:             g.yscl * sys_heightScale,
+				vs:             1,
+				rxadd:          0,
+				xas:            1,
+				yas:            1,
+				rot:            rot,
+				tint:           0,
+				blendMode:      rp.blendMode,
+				blendAlpha:     rp.blendAlpha,
+				mask:           0,
+				pfx:            palfx,
+				window:         window,
+				rcx:            0,
+				rcy:            0,
+				projectionMode: 0,
+				fLength:        0,
+				xOffset:        0,
+				yOffset:        0,
+				uv:             spr.UV,
+			}
+
+			// Use the standard sprite rendering
+			RenderSprite(charRP)
+		}
 	}
-
-	x -= xscl * float32(spr.Offset[0])
-	y -= yscl * float32(spr.Offset[1])
-	if spr.coldepth <= 8 && f.paltex == nil {
-		f.paltex = spr.CachePalette(pal)
-	}
-
-	// Update only the render parameters that change between each character
-	rp.tex = spr.Tex
-	rp.paltex = f.paltex
-	rp.size = spr.Size
-	rp.x = -x * sys_widthScale
-	rp.y = -y * sys_heightScale
-	rp.uv = spr.UV
-
-	RenderSprite(rp)
-	return float32(spr.Size[0]) * xscl
 }
-func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation, bank, align int32, window *[4]int32, palfx *PalFX, alpha float32) {
 
+// Simple debug version - draw one character at a time
+func (f *Fnt) drawCharsSimple(glyphs []glyphDrawInfo, rot Rotation, window *[4]int32, palfx *PalFX, rp RenderParams) {
+	for _, g := range glyphs {
+		spr := f.getCharSpr(g.c, g.bank, g.bt)
+		if spr == nil || spr.Tex == nil {
+			continue
+		}
+
+		// Create a simple render params for this character
+		charRP := RenderParams{
+			tex:            spr.Tex,
+			paltex:         f.paltex,
+			size:           spr.Size,
+			x:              -g.x * sys_widthScale,
+			y:              -g.y * sys_heightScale,
+			tile:           notiling,
+			xts:            g.xscl * sys_widthScale,
+			xbs:            g.xscl * sys_widthScale,
+			ys:             g.yscl * sys_heightScale,
+			vs:             1,
+			rxadd:          0,
+			xas:            1,
+			yas:            1,
+			rot:            rot,
+			tint:           0,
+			blendMode:      rp.blendMode,
+			blendAlpha:     rp.blendAlpha,
+			mask:           0,
+			pfx:            palfx,
+			window:         window,
+			rcx:            0,
+			rcy:            0,
+			projectionMode: 0,
+			fLength:        0,
+			xOffset:        0,
+			yOffset:        0,
+			uv:             spr.UV,
+		}
+
+		// Use the standard sprite rendering
+		RenderSprite(charRP)
+	}
+}
+
+func (f *Fnt) drawCharsBatch(
+	glyphs []glyphDrawInfo,
+	rot Rotation,
+	window *[4]int32,
+	palfx *PalFX,
+	rp RenderParams,
+) {
+	if len(glyphs) == 0 {
+		fmt.Printf("drawCharsBatch: No glyphs to render\n")
+		return
+	}
+
+	// ---- Configure pipeline once ----
+	gfx.SetPipeline(BlendAdd, BlendSrcAlpha, BlendOneMinusSrcAlpha)
+
+	proj := gfx.OrthographicProjectionMatrix(0, float32(sys_scrrect[2]), 0, float32(sys_scrrect[3]), -65535, 65535)
+	modelview := mgl.Ident4() // Identity - no translation needed since we'll use correct Y in vertices
+
+	gfx.SetUniformMatrix("projection", proj[:])
+	gfx.SetUniformMatrix("modelview", modelview[:])
+	gfx.SetUniformI("mask", 0)
+	gfx.SetUniformI("isFlat", 0)
+	gfx.SetUniformI("isTrapez", 0)
+
+	// PalFX
+	if f.paltex != nil {
+		gfx.SetTexture("pal", f.paltex)
+		gfx.SetUniformI("isRgba", 0)
+	} else {
+		gfx.SetUniformI("isRgba", 1)
+	}
+
+	neg, gray, padd, pmul, _, hue :=
+		func() (bool, float32, [3]float32, [3]float32, int32, float32) {
+			if palfx == nil {
+				return false, 0, [3]float32{}, [3]float32{1, 1, 1}, 0, 0
+			}
+			return palfx.getFcPalFx(false, rp.blendAlpha)
+		}()
+
+	gfx.SetUniformI("neg", int(Btoi(neg)))
+	gfx.SetUniformF("gray", gray)
+	gfx.SetUniformF("hue", hue)
+	gfx.SetUniformFv("add", padd[:])
+	gfx.SetUniformFv("mult", pmul[:])
+	gfx.SetUniformFv("tint", []float32{1, 1, 1, 1})
+	gfx.SetUniformF("alpha", float32(rp.blendAlpha[0])/255.0)
+
+	gfx.Scissor(window[0], window[1], window[2], window[3])
+	defer gfx.DisableScissor()
+
+	// ---- Group glyphs by texture ----
+	textureGroups := make(map[Texture][]glyphDrawInfo)
+	validGlyphCount := 0
+	for _, g := range glyphs {
+		spr := f.getCharSpr(g.c, g.bank, g.bt)
+		if spr == nil || spr.Tex == nil || !spr.Tex.IsValid() {
+			continue
+		}
+		textureGroups[spr.Tex] = append(textureGroups[spr.Tex], g)
+		validGlyphCount++
+	}
+
+	if validGlyphCount == 0 {
+		gfx.ReleasePipeline()
+		return
+	}
+
+	// ---- For each texture group, build triangles and draw ----
+	for tex, list := range textureGroups {
+		gfx.SetTexture("tex", tex)
+		gfx.SetUniformFv("uvRect", []float32{0, 0, 1, 1})
+		gfx.SetUniformI("useUV", 0)
+
+		// Build vertex data for all glyphs in this texture group
+		triVerts := make([]float32, 0, len(list)*6*4)
+
+		for _, g := range list {
+			spr := f.getCharSpr(g.c, g.bank, g.bt)
+			if spr == nil {
+				continue
+			}
+
+			// Screen coordinates (top-left origin)
+			screenX := g.x * sys_widthScale
+			screenY := g.y * sys_heightScale
+			w := float32(spr.Size[0]) * g.xscl * sys_widthScale
+			h := float32(spr.Size[1]) * g.yscl * sys_heightScale
+
+			// Convert to OpenGL coordinates (bottom-left origin)
+			// screenY is from top, convert to from bottom
+			glX := screenX
+			glY := float32(sys_scrrect[3]) - screenY - h
+
+			fmt.Printf("drawCharsBatch: Glyph '%c' screen(%.1f, %.1f) -> gl(%.1f, %.1f) size(%.1f, %.1f)\n",
+				g.c, screenX, screenY, glX, glY, w, h)
+
+			u1, v1, u2, v2 := spr.UV[0], spr.UV[1], spr.UV[2], spr.UV[3]
+			if u2 == 0 && v2 == 0 {
+				u1, v1, u2, v2 = 0, 0, 1, 1
+			}
+
+			// Quad in OpenGL space: bottom-left origin
+			// Triangle 1: BL, BR, TL
+			triVerts = append(triVerts,
+				glX, glY, u1, v2, // bottom-left
+				glX+w, glY, u2, v2, // bottom-right
+				glX, glY+h, u1, v1, // top-left
+			)
+			// Triangle 2: BR, TR, TL
+			triVerts = append(triVerts,
+				glX+w, glY, u2, v2, // bottom-right
+				glX+w, glY+h, u2, v1, // top-right
+				glX, glY+h, u1, v1, // top-left
+			)
+		}
+
+		if len(triVerts) == 0 {
+			continue
+		}
+
+		// DEBUG output
+		if len(triVerts) >= 12 {
+			fmt.Printf("drawCharsBatch: First quad vertices (GL space):\n")
+			fmt.Printf("  BL: (%.1f, %.1f) UV: (%. 3f, %.3f)\n", triVerts[0], triVerts[1], triVerts[2], triVerts[3])
+			fmt.Printf("  BR: (%.1f, %.1f) UV: (%.3f, %.3f)\n", triVerts[4], triVerts[5], triVerts[6], triVerts[7])
+			fmt.Printf("  TL: (%.1f, %.1f) UV: (%.3f, %.3f)\n", triVerts[8], triVerts[9], triVerts[10], triVerts[11])
+		}
+
+		// Upload and draw
+		gfx.SetVertexData2(triVerts)
+		vertexCount := int32(len(triVerts) / 4)
+
+		gl.DrawArrays(gl.TRIANGLES, 0, vertexCount)
+		sys_nDrawcall++
+
+		if err := gl.GetError(); err != gl.NO_ERROR {
+			fmt.Printf("drawCharsBatch: OpenGL error after draw: 0x%x\n", err)
+		}
+	}
+
+	gfx.ReleasePipeline()
+}
+
+// MODIFIED: Fixed DrawText function with proper batch rendering
+func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation, bank, align int32, window *[4]int32, palfx *PalFX, alpha float32) {
 	if len(txt) == 0 || xscl == 0 || yscl == 0 {
 		return
 	}
@@ -1314,7 +1558,7 @@ func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation
 		bank = 0
 	}
 
-	// not existing characters treated as space
+	// Replace non-existing characters with space
 	for i, c := range txt {
 		if c != ' ' && f.images[bt][c] == nil {
 			txt = txt[:i] + string(' ') + txt[i+1:]
@@ -1325,7 +1569,6 @@ func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation
 	y += float32(f.offset[1]-int32(f.Size[1])+1)*yscl + float32(sys_gameHeight-240)
 
 	var rcx, rcy float32
-
 	if rot.IsZero() {
 		if xscl < 0 {
 			x *= -1
@@ -1350,7 +1593,13 @@ func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation
 		pal = f.palettes[bank][:]
 	}
 
+	// Set up palette texture once for all characters
 	f.paltex = nil
+	if len(pal) > 0 {
+		// Create a temporary sprite to generate the palette texture
+		tempSpr := &Sprite{Pal: pal}
+		f.paltex = tempSpr.CachePalette(pal)
+	}
 
 	// Set the trans type
 	tt := TT_none
@@ -1360,13 +1609,13 @@ func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation
 
 	alphaVal := int32(255 * sys_brightness * alpha)
 
-	// Initialize common render parameters
+	// Initialize common render parameters for batch rendering
 	rp := RenderParams{
-		tex:            nil,
-		paltex:         nil,
-		size:           [2]uint16{0, 0},
-		x:              0,
-		y:              0,
+		tex:            nil, // Will be set per character
+		paltex:         f.paltex,
+		size:           [2]uint16{0, 0}, // Will be set per character
+		x:              0,               // Will be set per character
+		y:              0,               // Will be set per character
 		tile:           notiling,
 		xts:            xscl * sys_widthScale,
 		xbs:            xscl * sys_widthScale,
@@ -1388,10 +1637,66 @@ func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation
 		fLength:        0,
 		xOffset:        0,
 		yOffset:        0,
+		uv:             [4]float32{0, 0, 0, 0}, // Will be set per character
 	}
 
+	// Group characters by texture
+	textureMap := make(map[Texture][]glyphDrawInfo)
+	cx := x
+
 	for _, c := range txt {
-		x += f.drawChar(x, y, xscl, yscl, bank, bt, c, pal, rp) + xscl*float32(f.Spacing[0])
+		if c == ' ' {
+			cw := f.CharWidth(c, bank)
+			if cw+f.Spacing[0] > 0 {
+				cx += float32(cw) * xscl
+				cx += xscl * float32(f.Spacing[0])
+			}
+			continue
+		}
+
+		spr := f.getCharSpr(c, bank, bt)
+		if spr == nil || spr.Tex == nil {
+			continue
+		}
+
+		glyph := glyphDrawInfo{
+			x:    cx,
+			y:    y,
+			xscl: xscl,
+			yscl: yscl,
+			c:    c,
+			bank: bank,
+			bt:   bt,
+			pal:  pal,
+		}
+
+		textureMap[spr.Tex] = append(textureMap[spr.Tex], glyph)
+
+		cw := f.CharWidth(c, bank)
+		if cw+f.Spacing[0] > 0 {
+			cx += float32(cw) * xscl
+			cx += xscl * float32(f.Spacing[0])
+		}
+	}
+
+	// Render each texture group
+	for tex, glyphs := range textureMap {
+		// Set up render params for this texture group
+		groupRP := rp
+		groupRP.tex = tex
+
+		// In your DrawText function, before calling drawCharsBatch:
+		fmt.Printf("DrawText: Calling drawCharsBatch with %d glyphs\n", len(glyphs))
+		fmt.Printf("DrawText: Screen rect: %v\n", sys_scrrect)
+		fmt.Printf("DrawText: Width scale: %.2f, Height scale: %.2f\n", sys_widthScale, sys_heightScale)
+
+		// Use drawChars for this specific texture group
+		// f.drawChars(glyphs, rot, window, palfx, groupRP) // WORKING
+		// f.drawCharsSimple(glyphs, rot, window, palfx, groupRP) // WORKING
+		f.drawCharsBatch(glyphs, rot, window, palfx, groupRP) // WORKING
+
+		// Check state after call
+		// checkGLState("After drawCharsBatch")
 	}
 }
 
@@ -3617,6 +3922,11 @@ func (r *Renderer_GL) SetVertexData(values ...float32) {
 	gl.BindBuffer(gl.ARRAY_BUFFER, r.vertexBuffer)
 	gl.BufferData(gl.ARRAY_BUFFER, len(data), unsafe.Pointer(&data[0]), gl.STATIC_DRAW)
 }
+func (r *Renderer_GL) SetVertexData2(values []float32) {
+	data := f32.Bytes(binary.LittleEndian, values...)
+	gl.BindBuffer(gl.ARRAY_BUFFER, r.vertexBuffer)
+	gl.BufferData(gl.ARRAY_BUFFER, len(data), unsafe.Pointer(&data[0]), gl.STATIC_DRAW)
+}
 func (r *Renderer_GL) SetModelVertexData(bufferIndex uint32, values []byte) {
 	gl.BindBuffer(gl.ARRAY_BUFFER, r.modelVertexBuffer[bufferIndex])
 	gl.BufferData(gl.ARRAY_BUFFER, len(values), unsafe.Pointer(&values[0]), gl.STATIC_DRAW)
@@ -3633,6 +3943,49 @@ func (r *Renderer_GL) RenderQuad() {
 	gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4)
 	sys_nDrawcall++
 }
+
+// Compute the index order for count quads using degenerate stitching.
+// Example: 2 quads → strip uses 10 indices (4 + 2 + 4).
+func buildDegenerateStripIndices(count int) []int32 {
+	if count <= 0 {
+		return nil
+	}
+
+	// Each quad has exactly 4 vertices
+	// Strip requires: 4 + (count-1)*(4+2)
+	total := 4 + (count-1)*6
+	idx := make([]int32, 0, total)
+
+	// First quad
+	idx = append(idx, 0, 1, 2, 3)
+
+	for q := 1; q < count; q++ {
+		base := int32(q * 4)
+
+		// Insert degenerates: repeat last + next first
+		lastPrev := int32((q-1)*4 + 3)
+		idx = append(idx, lastPrev, base)
+
+		// Add quad
+		idx = append(idx, base, base+1, base+2, base+3)
+	}
+
+	return idx
+}
+
+// Renders all quads (4 vertices each) in ONE triangle strip using degenerates.
+// No changes to vertex data layout required.
+func (r *Renderer_GL) RenderQuadsStrip(count int) {
+	if count <= 0 {
+		return
+	}
+
+	indices := buildDegenerateStripIndices(count)
+	gl.DrawElements(gl.TRIANGLE_STRIP, int32(len(indices)), gl.UNSIGNED_INT,
+		gl.Ptr(indices))
+	sys_nDrawcall++
+}
+
 func (r *Renderer_GL) RenderElements(mode PrimitiveMode, count, offset int) {
 	gl.DrawElementsWithOffset(r.MapPrimitiveMode(mode), int32(count), gl.UNSIGNED_INT, uintptr(offset))
 	sys_nDrawcall++
@@ -4634,6 +4987,7 @@ func main() {
 	for !window.ShouldClose() {
 		glfw.PollEvents()
 		gfx.BeginFrame(true) // true to clear the frame
+		updateFPS()
 		src.Draw(100, 100, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
 		src.Draw(200, 200, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
 		src.Draw(300, 300, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
@@ -4642,6 +4996,8 @@ func main() {
 		fnt.DrawText("Test DrawText Ikemen Go 200,200", 200, 200, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
 		fnt.DrawText("Test DrawText Ikemen Go 300,300", 300, 300, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
 		fnt.DrawText("Test DrawText Ikemen Go 400,400", 400, 400, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		fpsText := fmt.Sprintf("FPS: %.1f | Draw Calls: %d", sys_gameFPS, sys_Drawcall)
+		fnt.DrawText(fpsText, 450, 450, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
 		gfx.EndFrame()
 		window.SwapBuffers()
 		// gfx.Await()
