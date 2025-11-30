@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"unsafe"
 
 	mgl "github.com/go-gl/mathgl/mgl32"
@@ -1494,8 +1495,8 @@ func (f *Fnt) drawCharsBatch(
 			glX := screenX
 			glY := float32(sys_scrrect[3]) - screenY - h
 
-			fmt.Printf("drawCharsBatch: Glyph '%c' screen(%.1f, %.1f) -> gl(%.1f, %.1f) size(%.1f, %.1f)\n",
-				g.c, screenX, screenY, glX, glY, w, h)
+			// fmt.Printf("drawCharsBatch: Glyph '%c' screen(%.1f, %.1f) -> gl(%.1f, %.1f) size(%.1f, %.1f)\n",
+			// 	g.c, screenX, screenY, glX, glY, w, h)
 
 			u1, v1, u2, v2 := spr.UV[0], spr.UV[1], spr.UV[2], spr.UV[3]
 			if u2 == 0 && v2 == 0 {
@@ -1522,12 +1523,12 @@ func (f *Fnt) drawCharsBatch(
 		}
 
 		// DEBUG output
-		if len(triVerts) >= 12 {
-			fmt.Printf("drawCharsBatch: First quad vertices (GL space):\n")
-			fmt.Printf("  BL: (%.1f, %.1f) UV: (%. 3f, %.3f)\n", triVerts[0], triVerts[1], triVerts[2], triVerts[3])
-			fmt.Printf("  BR: (%.1f, %.1f) UV: (%.3f, %.3f)\n", triVerts[4], triVerts[5], triVerts[6], triVerts[7])
-			fmt.Printf("  TL: (%.1f, %.1f) UV: (%.3f, %.3f)\n", triVerts[8], triVerts[9], triVerts[10], triVerts[11])
-		}
+		// if len(triVerts) >= 12 {
+		// 	fmt.Printf("drawCharsBatch: First quad vertices (GL space):\n")
+		// 	fmt.Printf("  BL: (%.1f, %.1f) UV: (%. 3f, %.3f)\n", triVerts[0], triVerts[1], triVerts[2], triVerts[3])
+		// 	fmt.Printf("  BR: (%.1f, %.1f) UV: (%.3f, %.3f)\n", triVerts[4], triVerts[5], triVerts[6], triVerts[7])
+		// 	fmt.Printf("  TL: (%.1f, %.1f) UV: (%.3f, %.3f)\n", triVerts[8], triVerts[9], triVerts[10], triVerts[11])
+		// }
 
 		// Upload and draw
 		gfx.SetVertexData2(triVerts)
@@ -1539,6 +1540,140 @@ func (f *Fnt) drawCharsBatch(
 		if err := gl.GetError(); err != gl.NO_ERROR {
 			fmt.Printf("drawCharsBatch: OpenGL error after draw: 0x%x\n", err)
 		}
+	}
+
+	gfx.ReleasePipeline()
+}
+
+// Global (or per-renderer)
+var textVertexPool struct {
+	data []float32
+	mu   sync.Mutex
+}
+
+func getTextVertexBuffer(capacity int) []float32 {
+	textVertexPool.mu.Lock()
+	defer textVertexPool.mu.Unlock()
+
+	if cap(textVertexPool.data) < capacity {
+		textVertexPool.data = make([]float32, 0, capacity*2) // Allocate 2x to reduce reallocations
+	}
+	textVertexPool.data = textVertexPool.data[:0] // Reset to length 0
+	return textVertexPool.data
+}
+func (f *Fnt) drawCharsBatchOptimized(
+	glyphs []glyphDrawInfo,
+	rot Rotation,
+	window *[4]int32,
+	palfx *PalFX,
+	rp RenderParams,
+) {
+	if len(glyphs) == 0 {
+		return
+	}
+
+	// Setup pipeline once
+	gfx.SetPipeline(BlendAdd, BlendSrcAlpha, BlendOneMinusSrcAlpha)
+
+	// Setup uniforms once
+	proj := gfx.OrthographicProjectionMatrix(0, float32(sys_scrrect[2]), 0, float32(sys_scrrect[3]), -65535, 65535)
+	gfx.SetUniformMatrix("projection", proj[:])
+	modelview := mgl.Ident4()
+	gfx.SetUniformMatrix("modelview", modelview[:])
+	gfx.SetUniformI("mask", 0)
+	gfx.SetUniformI("isFlat", 0)
+	gfx.SetUniformI("isTrapez", 0)
+
+	if f.paltex != nil {
+		gfx.SetTexture("pal", f.paltex)
+		gfx.SetUniformI("isRgba", 0)
+	} else {
+		gfx.SetUniformI("isRgba", 1)
+	}
+
+	neg, gray, padd, pmul, _, hue := func() (bool, float32, [3]float32, [3]float32, int32, float32) {
+		if palfx == nil {
+			return false, 0, [3]float32{}, [3]float32{1, 1, 1}, 0, 0
+		}
+		return palfx.getFcPalFx(false, rp.blendAlpha)
+	}()
+
+	gfx.SetUniformI("neg", int(Btoi(neg)))
+	gfx.SetUniformF("gray", gray)
+	gfx.SetUniformF("hue", hue)
+	gfx.SetUniformFv("add", padd[:])
+	gfx.SetUniformFv("mult", pmul[:])
+	gfx.SetUniformFv("tint", []float32{1, 1, 1, 1})
+	gfx.SetUniformF("alpha", float32(rp.blendAlpha[0])/255.0)
+	gfx.SetUniformFv("uvRect", []float32{0, 0, 1, 1})
+	gfx.SetUniformI("useUV", 0)
+
+	gfx.Scissor(window[0], window[1], window[2], window[3])
+	defer gfx.DisableScissor()
+
+	// Group by texture (still needed if using different atlases)
+	textureGroups := make(map[Texture][]glyphDrawInfo)
+	for _, g := range glyphs {
+		spr := f.getCharSpr(g.c, g.bank, g.bt)
+		if spr == nil || spr.Tex == nil || !spr.Tex.IsValid() {
+			continue
+		}
+		textureGroups[spr.Tex] = append(textureGroups[spr.Tex], g)
+	}
+
+	if len(textureGroups) == 0 {
+		gfx.ReleasePipeline()
+		return
+	}
+
+	// Reuse buffer pool
+	triVerts := getTextVertexBuffer(len(glyphs) * 6 * 4)
+
+	// Draw each texture group
+	for tex, list := range textureGroups {
+		gfx.SetTexture("tex", tex)
+		triVerts = triVerts[:0] // Reset
+
+		for _, g := range list {
+			spr := f.getCharSpr(g.c, g.bank, g.bt)
+			if spr == nil {
+				continue
+			}
+
+			screenX := g.x * sys_widthScale
+			screenY := g.y * sys_heightScale
+			w := float32(spr.Size[0]) * g.xscl * sys_widthScale
+			h := float32(spr.Size[1]) * g.yscl * sys_heightScale
+
+			// Cull completely offscreen glyphs
+			if screenX+w < 0 || screenX > float32(sys_scrrect[2]) ||
+				screenY+h < 0 || screenY > float32(sys_scrrect[3]) {
+				continue
+			}
+
+			glY := float32(sys_scrrect[3]) - screenY - h
+			u1, v1, u2, v2 := spr.UV[0], spr.UV[1], spr.UV[2], spr.UV[3]
+			if u2 == 0 && v2 == 0 {
+				u1, v1, u2, v2 = 0, 0, 1, 1
+			}
+
+			triVerts = append(triVerts,
+				screenX, glY, u1, v2,
+				screenX+w, glY, u2, v2,
+				screenX, glY+h, u1, v1,
+				screenX+w, glY, u2, v2,
+				screenX+w, glY+h, u2, v1,
+				screenX, glY+h, u1, v1,
+			)
+		}
+
+		if len(triVerts) == 0 {
+			continue
+		}
+
+		gfx.SetVertexData2(triVerts)
+		gl.DrawArrays(gl.TRIANGLES, 0, int32(len(triVerts)/4))
+		sys_nDrawcall++
 	}
 
 	gfx.ReleasePipeline()
@@ -1686,9 +1821,9 @@ func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation
 		groupRP.tex = tex
 
 		// In your DrawText function, before calling drawCharsBatch:
-		fmt.Printf("DrawText: Calling drawCharsBatch with %d glyphs\n", len(glyphs))
-		fmt.Printf("DrawText: Screen rect: %v\n", sys_scrrect)
-		fmt.Printf("DrawText: Width scale: %.2f, Height scale: %.2f\n", sys_widthScale, sys_heightScale)
+		// fmt.Printf("DrawText: Calling drawCharsBatch with %d glyphs\n", len(glyphs))
+		// fmt.Printf("DrawText: Screen rect: %v\n", sys_scrrect)
+		// fmt.Printf("DrawText: Width scale: %.2f, Height scale: %.2f\n", sys_widthScale, sys_heightScale)
 
 		// Use drawChars for this specific texture group
 		// f.drawChars(glyphs, rot, window, palfx, groupRP) // WORKING
