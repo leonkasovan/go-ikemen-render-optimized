@@ -522,7 +522,7 @@ func initGLFW() *glfw.Window {
 	glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile)
 	glfw.WindowHint(glfw.OpenGLForwardCompatible, glfw.True)
 
-	window, err := glfw.CreateWindow(scr_width, scr_height, "Colored Rectangle", nil, nil)
+	window, err := glfw.CreateWindow(scr_width, scr_height, "Ikemen Render", nil, nil)
 	if err != nil {
 		log.Fatalln("failed to create window:", err)
 	}
@@ -2492,32 +2492,6 @@ func (t *Texture_GL) SavePNG(filename string, pal []uint32) error {
 				return err
 			}
 
-			// Also save an expanded RGBA image so viewers see the atlas even if
-			// the saved paletted PNG has transparent palette entries.
-			expanded := image.NewNRGBA(image.Rect(0, 0, int(t.width), int(t.height)))
-			for i := range data {
-				v := int(data[i])
-				if v < len(gpal) {
-					cr, cg, cb, ca := gpal[v].RGBA()
-					expanded.Pix[4*i+0] = uint8(cr >> 8)
-					expanded.Pix[4*i+1] = uint8(cg >> 8)
-					expanded.Pix[4*i+2] = uint8(cb >> 8)
-					expanded.Pix[4*i+3] = uint8(ca >> 8)
-				} else {
-					expanded.Pix[4*i+0] = 255
-					expanded.Pix[4*i+1] = 0
-					expanded.Pix[4*i+2] = 255
-					expanded.Pix[4*i+3] = 255
-				}
-			}
-			if ef, eerr := os.Create(filename + ".rgba.png"); eerr == nil {
-				png.Encode(ef, expanded)
-				ef.Close()
-				log.Printf("SavePNG: expanded RGBA image written to %s", filename+".rgba.png")
-			} else {
-				log.Printf("SavePNG: failed to write expanded RGBA: %v", eerr)
-			}
-
 			// Basic verification: ensure data isn't all a single repeated index (likely blank)
 			counts := make([]int, 256)
 			for i := range data {
@@ -2529,30 +2503,6 @@ func (t *Texture_GL) SavePNG(filename string, pal []uint32) error {
 					unique++
 				}
 			}
-
-			// Log top indices and palette alpha stats to help debug invisible/blank outputs
-			topN := 8
-			used := make([]bool, 256)
-			for k := 0; k < topN; k++ {
-				bestIdx := -1
-				bestCount := 0
-				for i, c := range counts {
-					if used[i] || c == 0 {
-						continue
-					}
-					if c > bestCount {
-						bestCount = c
-						bestIdx = i
-					}
-				}
-				if bestIdx == -1 {
-					break
-				}
-				used[bestIdx] = true
-				cr, cg, cb, ca := gpal[bestIdx].RGBA()
-				log.Printf("SavePNG: top[%d] idx=%d count=%d color=R=%d G=%d B=%d A=%d", k, bestIdx, bestCount, cr>>8, cg>>8, cb>>8, ca>>8)
-			}
-
 			// Count zero-alpha palette entries
 			zeroAlpha := 0
 			for i := 0; i < len(gpal); i++ {
@@ -2564,100 +2514,6 @@ func (t *Texture_GL) SavePNG(filename string, pal []uint32) error {
 			if zeroAlpha > 0 {
 				log.Printf("SavePNG: palette has %d/%d entries with zero alpha", zeroAlpha, len(gpal))
 			}
-
-			// Produce an index-map visualisation (ignores palette alpha) so we can
-			// see the index layout independent of palette transparency.
-			idxImg := image.NewNRGBA(image.Rect(0, 0, int(t.width), int(t.height)))
-			for i := range data {
-				idx := int(data[i])
-				r := uint8((idx * 97) % 256)
-				g := uint8((idx * 53) % 256)
-				b := uint8((idx * 193) % 256)
-				idxImg.Pix[4*i+0] = r
-				idxImg.Pix[4*i+1] = g
-				idxImg.Pix[4*i+2] = b
-				idxImg.Pix[4*i+3] = 255
-			}
-			if df, derr := os.Create(filename + ".indexmap.png"); derr == nil {
-				png.Encode(df, idxImg)
-				df.Close()
-				log.Printf("SavePNG: index map written to %s", filename+".indexmap.png")
-			} else {
-				log.Printf("SavePNG: failed to write index map: %v", derr)
-			}
-
-			// Also write a palette-visualisation where each index is mapped
-			// through the actual palette, but force alpha=255 so colors are visible
-			palvis := image.NewNRGBA(image.Rect(0, 0, int(t.width), int(t.height)))
-			for i := range data {
-				v := int(data[i])
-				if v < len(gpal) {
-					cr, cg, cb, _ := gpal[v].RGBA()
-					palvis.Pix[4*i+0] = uint8(cr >> 8)
-					palvis.Pix[4*i+1] = uint8(cg >> 8)
-					palvis.Pix[4*i+2] = uint8(cb >> 8)
-					palvis.Pix[4*i+3] = 255
-				} else {
-					palvis.Pix[4*i+0] = 255
-					palvis.Pix[4*i+1] = 0
-					palvis.Pix[4*i+2] = 255
-					palvis.Pix[4*i+3] = 255
-				}
-			}
-			if df, derr := os.Create(filename + ".palvis.png"); derr == nil {
-				png.Encode(df, palvis)
-				df.Close()
-				log.Printf("SavePNG: palette visualisation written to %s", filename+".palvis.png")
-			}
-
-			if unique <= 1 {
-				// Find the dominant index
-				dominantIdx := 0
-				dominantCount := 0
-				for i, c := range counts {
-					if c > dominantCount {
-						dominantIdx = i
-						dominantCount = c
-					}
-				}
-				log.Printf("SavePNG: saved paletted PNG but image appears uniform (unique indices=%d) dominantIdx=%d count=%d. Writing debug dump.", unique, dominantIdx, dominantCount)
-
-				// Log the first palette entries to help understand what the repeated
-				// index maps to (alpha may be zero).
-				for i := 0; i < 16 && i < len(gpal); i++ {
-					cr, cg, cb, ca := gpal[i].RGBA()
-					log.Printf("SavePNG: pal[%02d] = R=%d G=%d B=%d A=%d", i, cr>>8, cg>>8, cb>>8, ca>>8)
-				}
-				dbg := image.NewNRGBA(image.Rect(0, 0, int(t.width), int(t.height)))
-				for i := range data {
-					v := int(data[i])
-					if v < len(gpal) {
-						cr, cg, cb, ca := gpal[v].RGBA()
-						dbg.Pix[4*i+0] = uint8(cr >> 8)
-						dbg.Pix[4*i+1] = uint8(cg >> 8)
-						dbg.Pix[4*i+2] = uint8(cb >> 8)
-						a8 := uint8(ca >> 8)
-						if a8 == 0 {
-							a8 = 255
-						}
-						dbg.Pix[4*i+3] = a8
-					} else {
-						dbg.Pix[4*i+0] = 255
-						dbg.Pix[4*i+1] = 0
-						dbg.Pix[4*i+2] = 255
-						dbg.Pix[4*i+3] = 255
-					}
-				}
-				dfn := filename + ".debug.png"
-				if df, derr := os.Create(dfn); derr == nil {
-					png.Encode(df, dbg)
-					df.Close()
-					log.Printf("SavePNG: debug dump written to %s", dfn)
-				} else {
-					log.Printf("SavePNG: failed to write debug dump: %v", derr)
-				}
-			}
-
 			return nil
 		}
 
@@ -2753,93 +2609,14 @@ var vertShader string
 //go:embed shaders/sprite.frag.glsl
 var fragShader string
 
-//go:embed shaders/model.vert.glsl
-var modelVertShader string
-
-//go:embed shaders/model.frag.glsl
-var modelFragShader string
-
-//go:embed shaders/shadow.vert.glsl
-var shadowVertShader string
-
-//go:embed shaders/shadow.frag.glsl
-var shadowFragShader string
-
-//go:embed shaders/shadow.geo.glsl
-var shadowGeoShader string
-
 //go:embed shaders/ident.vert.glsl
 var identVertShader string
 
 //go:embed shaders/ident.frag.glsl
 var identFragShader string
 
-//go:embed shaders/panoramaToCubeMap.frag.glsl
-var panoramaToCubeMapFragShader string
-
-//go:embed shaders/cubemapFiltering.frag.glsl
-var cubemapFilteringFragShader string
-
 func (r *Renderer_GL) GetName() string {
 	return "OpenGL 3.3"
-}
-
-// init 3D model shader
-func (r *Renderer_GL) InitModelShader() error {
-	var err error
-	if r.enableShadow {
-		r.modelShader, err = r.newShaderProgram(modelVertShader, "#define ENABLE_SHADOW\n"+modelFragShader, "", "Model Shader", false)
-	} else {
-		r.modelShader, err = r.newShaderProgram(modelVertShader, modelFragShader, "", "Model Shader", false)
-	}
-	if err != nil {
-		return err
-	}
-	r.modelShader.RegisterAttributes("vertexId", "position", "uv", "normalIn", "tangentIn", "vertColor", "joints_0", "joints_1", "weights_0", "weights_1", "outlineAttributeIn")
-	r.modelShader.RegisterUniforms("model", "view", "projection", "normalMatrix", "unlit", "baseColorFactor", "add", "mult", "useTexture", "useNormalMap", "useMetallicRoughnessMap", "useEmissionMap", "neg", "gray", "hue",
-		"enableAlpha", "alphaThreshold", "numJoints", "morphTargetWeight", "morphTargetOffset", "morphTargetTextureDimension", "numTargets", "numVertices",
-		"metallicRoughness", "ambientOcclusionStrength", "emission", "environmentIntensity", "mipCount", "meshOutline",
-		"cameraPosition", "environmentRotation", "texTransform", "normalMapTransform", "metallicRoughnessMapTransform", "ambientOcclusionMapTransform", "emissionMapTransform",
-		"lightMatrices[0]", "lightMatrices[1]", "lightMatrices[2]", "lightMatrices[3]",
-		"lights[0].direction", "lights[0].range", "lights[0].color", "lights[0].intensity", "lights[0].position", "lights[0].innerConeCos", "lights[0].outerConeCos", "lights[0].type", "lights[0].shadowBias", "lights[0].shadowMapFar",
-		"lights[1].direction", "lights[1].range", "lights[1].color", "lights[1].intensity", "lights[1].position", "lights[1].innerConeCos", "lights[1].outerConeCos", "lights[1].type", "lights[1].shadowBias", "lights[1].shadowMapFar",
-		"lights[2].direction", "lights[2].range", "lights[2].color", "lights[2].intensity", "lights[2].position", "lights[2].innerConeCos", "lights[2].outerConeCos", "lights[2].type", "lights[2].shadowBias", "lights[2].shadowMapFar",
-		"lights[3].direction", "lights[3].range", "lights[3].color", "lights[3].intensity", "lights[3].position", "lights[3].innerConeCos", "lights[3].outerConeCos", "lights[3].type", "lights[3].shadowBias", "lights[3].shadowMapFar",
-	)
-	r.modelShader.RegisterTextures("tex", "morphTargetValues", "jointMatrices", "normalMap", "metallicRoughnessMap", "ambientOcclusionMap", "emissionMap", "lambertianEnvSampler", "GGXEnvSampler", "GGXLUT",
-		"shadowCubeMap")
-
-	if r.enableShadow {
-		r.shadowMapShader, err = r.newShaderProgram(shadowVertShader, shadowFragShader, shadowGeoShader, "Shadow Map Shader", false)
-		if err != nil {
-			return err
-		}
-		r.shadowMapShader.RegisterAttributes("vertexId", "position", "vertColor", "uv", "joints_0", "joints_1", "weights_0", "weights_1")
-		r.shadowMapShader.RegisterUniforms("model", "lightMatrices[0]", "lightMatrices[1]", "lightMatrices[2]", "lightMatrices[3]", "lightMatrices[4]", "lightMatrices[5]",
-			"lightMatrices[6]", "lightMatrices[7]", "lightMatrices[8]", "lightMatrices[9]", "lightMatrices[10]", "lightMatrices[11]",
-			"lightMatrices[12]", "lightMatrices[13]", "lightMatrices[14]", "lightMatrices[15]", "lightMatrices[16]", "lightMatrices[17]",
-			"lightMatrices[18]", "lightMatrices[19]", "lightMatrices[20]", "lightMatrices[21]", "lightMatrices[22]", "lightMatrices[23]",
-			"lights[0].type", "lights[1].type", "lights[2].type", "lights[3].type", "lights[0].position", "lights[1].position", "lights[2].position", "lights[3].position",
-			"lights[0].shadowMapFar", "lights[1].shadowMapFar", "lights[2].shadowMapFar", "lights[3].shadowMapFar", "numJoints", "morphTargetWeight", "morphTargetOffset", "morphTargetTextureDimension",
-			"numTargets", "numVertices", "enableAlpha", "alphaThreshold", "baseColorFactor", "useTexture", "texTransform", "layerOffset", "lightIndex")
-		r.shadowMapShader.RegisterTextures("morphTargetValues", "jointMatrices", "tex")
-	}
-	r.panoramaToCubeMapShader, err = r.newShaderProgram(identVertShader, panoramaToCubeMapFragShader, "", "Panorama To Cubemap Shader", false)
-	if err != nil {
-		return err
-	}
-	r.panoramaToCubeMapShader.RegisterAttributes("VertCoord")
-	r.panoramaToCubeMapShader.RegisterUniforms("currentFace")
-	r.panoramaToCubeMapShader.RegisterTextures("panorama")
-
-	r.cubemapFilteringShader, err = r.newShaderProgram(identVertShader, cubemapFilteringFragShader, "", "Cubemap Filtering Shader", false)
-	if err != nil {
-		return err
-	}
-	r.cubemapFilteringShader.RegisterAttributes("VertCoord")
-	r.cubemapFilteringShader.RegisterUniforms("sampleCount", "distribution", "width", "currentFace", "roughness", "intensityScale", "isLUT")
-	r.cubemapFilteringShader.RegisterTextures("cubeMap")
-	return nil
 }
 
 // Render initialization.
@@ -2889,27 +2666,8 @@ func (r *Renderer_GL) Init() {
 		"alpha", "tint", "mask", "neg", "gray", "add", "mult", "isFlat", "isRgba", "isTrapez", "hue", "uvRect", "useUV")
 	r.spriteShader.RegisterTextures("pal", "tex")
 
-	if r.enableModel {
-		if err := r.InitModelShader(); err != nil {
-			r.enableModel = false
-		}
-	}
-
-	// Compile postprocessing shaders
-
 	// Calculate total amount of shaders loaded.
 	r.postShaderSelect = make([]*ShaderProgram_GL, 1)
-
-	// External Shaders
-	// for i := 0; i < len(sys_cfg.Video.ExternalShaders); i++ {
-	// 	r.postShaderSelect[i], _ = r.newShaderProgram(string(sys_externalShaders[0][i])+"\x00",
-	// 		string(sys_externalShaders[1][i])+"\x00", "", fmt.Sprintf("Postprocess Shader #%v", i), true)
-	// 	r.postShaderSelect[i].RegisterAttributes("VertCoord", "TexCoord")
-	// 	loc := r.postShaderSelect[i].a["TexCoord"]
-	// 	gl.VertexAttribPointer(uint32(loc), 3, gl.FLOAT, false, 5*4, gl.PtrOffset(2*4))
-	// 	gl.EnableVertexAttribArray(uint32(loc))
-	// 	r.postShaderSelect[i].RegisterUniforms("Texture_GL", "TextureSize", "CurrentTime")
-	// }
 
 	// Ident shader (no postprocessing). This is the last one
 	identShader, _ := r.newShaderProgram(identVertShader, identFragShader, "", "Identity Postprocess", true)
@@ -2917,21 +2675,9 @@ func (r *Renderer_GL) Init() {
 	identShader.RegisterUniforms("Texture_GL", "TextureSize", "CurrentTime")
 	r.postShaderSelect[len(r.postShaderSelect)-1] = identShader
 
-	// if sys_msaa > 0 {
-	// 	gl.Enable(gl.MULTISAMPLE)
-	// }
-
 	gl.ActiveTexture(gl.TEXTURE0)
-
-	// create a texture for r.fbo
 	gl.GenTextures(1, &r.fbo_texture)
-
-	// if sys_msaa > 0 {
-	// 	gl.BindTexture(gl.TEXTURE_2D_MULTISAMPLE, r.fbo_texture)
-	// } else {
 	gl.BindTexture(gl.TEXTURE_2D, r.fbo_texture)
-	// }
-
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
@@ -2990,77 +2736,20 @@ func (r *Renderer_GL) Init() {
 
 	// done with r.fbo_texture, unbind it
 	gl.BindTexture(gl.TEXTURE_2D, 0)
-
-	//r.rbo_depth = gl.CreateRenderbuffer()
 	gl.GenRenderbuffers(1, &r.rbo_depth)
-
 	gl.BindRenderbuffer(gl.RENDERBUFFER, r.rbo_depth)
-	// if sys_msaa > 0 {
-	//gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, int(sys_scrrect[2]), int(sys_scrrect[3]))
-	// gl.RenderbufferStorageMultisample(gl.RENDERBUFFER, sys_msaa, gl.DEPTH_COMPONENT16, sys_scrrect[2], sys_scrrect[3])
-	// } else {
 	gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, sys_scrrect[2], sys_scrrect[3])
-	// }
 	gl.BindRenderbuffer(gl.RENDERBUFFER, 0)
-	// if sys_msaa > 0 {
-	// r.fbo_f_texture = r.newTexture(sys_scrrect[2], sys_scrrect[3], 32, false).(*Texture_GL)
-	// r.fbo_f_texture.SetData(nil)
-	// } else {
-	//r.rbo_depth = gl.CreateRenderbuffer()
-	//gl.BindRenderbuffer(gl.RENDERBUFFER, r.rbo_depth)
-	//gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, int(sys_scrrect[2]), int(sys_scrrect[3]))
-	//gl.BindRenderbuffer(gl.RENDERBUFFER, gl.NoRenderbuffer)
-	// }
-
-	// create an FBO for our r.fbo, which is then for r.fbo_texture
 	gl.GenFramebuffers(1, &r.fbo)
 	gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo)
-
-	// if sys_msaa > 0 {
-	// 	gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D_MULTISAMPLE, r.fbo_texture, 0)
-	// 	gl.FramebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, r.rbo_depth)
-	// 	if status := gl.CheckFramebufferStatus(gl.FRAMEBUFFER); status != gl.FRAMEBUFFER_COMPLETE {
-	// 		sys_errLog.Printf("framebuffer create failed: 0x%x", status)
-	// 		fmt.Printf("framebuffer create failed: 0x%x \n", status)
-	// 	}
-	// 	gl.GenFramebuffers(1, &r.fbo_f)
-	// 	gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo_f)
-	// 	gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, r.fbo_f_texture.handle, 0)
-	// } else {
 	gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, r.fbo_texture, 0)
 	gl.FramebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, r.rbo_depth)
-	// }
 
 	// create our two FBOs for our postprocessing needs
 	for i := 0; i < 2; i++ {
 		gl.GenFramebuffers(1, &(r.fbo_pp[i]))
 		gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo_pp[i])
 		gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, r.fbo_pp_texture[i], 0)
-	}
-
-	// create an FBO for our model stuff
-	if r.enableModel {
-		if r.enableShadow {
-			gl.GenFramebuffers(1, &r.fbo_shadow)
-			gl.ActiveTexture(gl.TEXTURE0)
-			gl.GenTextures(1, &r.fbo_shadow_cube_texture)
-
-			gl.BindTexture(gl.TEXTURE_CUBE_MAP_ARRAY_ARB, r.fbo_shadow_cube_texture)
-			gl.TexStorage3D(gl.TEXTURE_CUBE_MAP_ARRAY_ARB, 1, gl.DEPTH_COMPONENT24, 1024, 1024, 4*6)
-			gl.TexParameteri(gl.TEXTURE_CUBE_MAP_ARRAY_ARB, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
-			gl.TexParameteri(gl.TEXTURE_CUBE_MAP_ARRAY_ARB, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
-			gl.TexParameteri(gl.TEXTURE_CUBE_MAP_ARRAY_ARB, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-			gl.TexParameteri(gl.TEXTURE_CUBE_MAP_ARRAY_ARB, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-
-			gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo_shadow)
-			gl.DrawBuffer(gl.NONE)
-			sys_nDrawcall++
-			gl.ReadBuffer(gl.NONE)
-			if status := gl.CheckFramebufferStatus(gl.FRAMEBUFFER); status != gl.FRAMEBUFFER_COMPLETE {
-				fmt.Printf("framebuffer create failed: 0x%x", status)
-			}
-		}
-		gl.GenFramebuffers(1, &r.fbo_env)
 	}
 	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
 }
@@ -3916,128 +3605,6 @@ func (r *Renderer_GL) RenderQuad() {
 	gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4)
 	sys_nDrawcall++
 }
-func (r *Renderer_GL) RenderElements(mode PrimitiveMode, count, offset int) {
-	gl.DrawElementsWithOffset(r.MapPrimitiveMode(mode), int32(count), gl.UNSIGNED_INT, uintptr(offset))
-	sys_nDrawcall++
-}
-func (r *Renderer_GL) RenderShadowMapElements(mode PrimitiveMode, count, offset int) {
-	r.RenderElements(mode, count, offset)
-}
-
-func (r *Renderer_GL) RenderCubeMap(envTex Texture, cubeTex Texture) {
-	envTexture := envTex.(*Texture_GL)
-	cubeTexture := cubeTex.(*Texture_GL)
-	textureSize := cubeTexture.width
-	gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo_env)
-	gl.Viewport(0, 0, textureSize, textureSize)
-	gl.UseProgram(r.panoramaToCubeMapShader.program)
-	loc := r.panoramaToCubeMapShader.a["VertCoord"]
-	gl.EnableVertexAttribArray(uint32(loc))
-	gl.VertexAttribPointerWithOffset(uint32(loc), 2, gl.FLOAT, false, 0, 0)
-	data := f32.Bytes(binary.LittleEndian, -1, -1, 1, -1, -1, 1, 1, 1)
-	gl.BindBuffer(gl.ARRAY_BUFFER, r.vertexBuffer)
-	gl.BufferData(gl.ARRAY_BUFFER, len(data), unsafe.Pointer(&data[0]), gl.STATIC_DRAW)
-	loc, unit := r.panoramaToCubeMapShader.u["panorama"], r.panoramaToCubeMapShader.t["panorama"]
-	gl.ActiveTexture((uint32(gl.TEXTURE0 + unit)))
-	gl.BindTexture(gl.TEXTURE_2D, envTexture.handle)
-	gl.Uniform1i(loc, int32(unit))
-	for i := 0; i < 6; i++ {
-		gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, uint32(gl.TEXTURE_CUBE_MAP_POSITIVE_X+i), cubeTexture.handle, 0)
-
-		gl.Clear(gl.COLOR_BUFFER_BIT)
-		loc := r.panoramaToCubeMapShader.u["currentFace"]
-		gl.Uniform1i(loc, int32(i))
-
-		gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4)
-		sys_nDrawcall++
-	}
-	gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo)
-	gl.BindTexture(gl.TEXTURE_CUBE_MAP, cubeTexture.handle)
-	gl.GenerateMipmap(gl.TEXTURE_CUBE_MAP)
-}
-func (r *Renderer_GL) RenderFilteredCubeMap(distribution int32, cubeTex Texture, filteredTex Texture, mipmapLevel, sampleCount int32, roughness float32) {
-	cubeTexture := cubeTex.(*Texture_GL)
-	filteredTexture := filteredTex.(*Texture_GL)
-	textureSize := filteredTexture.width
-	currentTextureSize := textureSize >> mipmapLevel
-	gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo_env)
-	gl.Viewport(0, 0, currentTextureSize, currentTextureSize)
-	gl.UseProgram(r.cubemapFilteringShader.program)
-	loc := r.cubemapFilteringShader.a["VertCoord"]
-	gl.EnableVertexAttribArray(uint32(loc))
-	gl.VertexAttribPointerWithOffset(uint32(loc), 2, gl.FLOAT, false, 0, 0)
-	data := f32.Bytes(binary.LittleEndian, -1, -1, 1, -1, -1, 1, 1, 1)
-	gl.BindBuffer(gl.ARRAY_BUFFER, r.vertexBuffer)
-	gl.BufferData(gl.ARRAY_BUFFER, len(data), unsafe.Pointer(&data[0]), gl.STATIC_DRAW)
-	loc, unit := r.cubemapFilteringShader.u["cubeMap"], r.cubemapFilteringShader.t["cubeMap"]
-	gl.ActiveTexture((uint32(gl.TEXTURE0 + unit)))
-	gl.BindTexture(gl.TEXTURE_CUBE_MAP, cubeTexture.handle)
-	gl.Uniform1i(loc, int32(unit))
-	loc = r.cubemapFilteringShader.u["sampleCount"]
-	gl.Uniform1i(loc, sampleCount)
-	loc = r.cubemapFilteringShader.u["distribution"]
-	gl.Uniform1i(loc, distribution)
-	loc = r.cubemapFilteringShader.u["width"]
-	gl.Uniform1i(loc, textureSize)
-	loc = r.cubemapFilteringShader.u["roughness"]
-	gl.Uniform1f(loc, roughness)
-	loc = r.cubemapFilteringShader.u["intensityScale"]
-	gl.Uniform1f(loc, 1)
-	loc = r.cubemapFilteringShader.u["isLUT"]
-	gl.Uniform1i(loc, 0)
-	for i := 0; i < 6; i++ {
-		gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, uint32(gl.TEXTURE_CUBE_MAP_POSITIVE_X+i), filteredTexture.handle, mipmapLevel)
-
-		gl.Clear(gl.COLOR_BUFFER_BIT)
-		loc := r.cubemapFilteringShader.u["currentFace"]
-		gl.Uniform1i(loc, int32(i))
-
-		gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4)
-		sys_nDrawcall++
-	}
-	gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo)
-}
-func (r *Renderer_GL) RenderLUT(distribution int32, cubeTex Texture, lutTex Texture, sampleCount int32) {
-	cubeTexture := cubeTex.(*Texture_GL)
-	lutTexture := lutTex.(*Texture_GL)
-	textureSize := lutTexture.width
-	gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo_env)
-	gl.Viewport(0, 0, textureSize, textureSize)
-	gl.UseProgram(r.cubemapFilteringShader.program)
-	loc := r.cubemapFilteringShader.a["VertCoord"]
-	gl.EnableVertexAttribArray(uint32(loc))
-	gl.VertexAttribPointerWithOffset(uint32(loc), 2, gl.FLOAT, false, 0, 0)
-	data := f32.Bytes(binary.LittleEndian, -1, -1, 1, -1, -1, 1, 1, 1)
-	gl.BindBuffer(gl.ARRAY_BUFFER, r.vertexBuffer)
-	gl.BufferData(gl.ARRAY_BUFFER, len(data), unsafe.Pointer(&data[0]), gl.STATIC_DRAW)
-	loc, unit := r.cubemapFilteringShader.u["cubeMap"], r.cubemapFilteringShader.t["cubeMap"]
-	gl.ActiveTexture((uint32(gl.TEXTURE0 + unit)))
-	gl.BindTexture(gl.TEXTURE_CUBE_MAP, cubeTexture.handle)
-	gl.Uniform1i(loc, int32(unit))
-	loc = r.cubemapFilteringShader.u["sampleCount"]
-	gl.Uniform1i(loc, sampleCount)
-	loc = r.cubemapFilteringShader.u["distribution"]
-	gl.Uniform1i(loc, distribution)
-	loc = r.cubemapFilteringShader.u["width"]
-	gl.Uniform1i(loc, textureSize)
-	loc = r.cubemapFilteringShader.u["roughness"]
-	gl.Uniform1f(loc, 0)
-	loc = r.cubemapFilteringShader.u["intensityScale"]
-	gl.Uniform1f(loc, 1)
-	loc = r.cubemapFilteringShader.u["currentFace"]
-	gl.Uniform1i(loc, 0)
-	loc = r.cubemapFilteringShader.u["isLUT"]
-	gl.Uniform1i(loc, 1)
-
-	gl.BindTexture(gl.TEXTURE_2D, lutTexture.handle)
-	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, lutTexture.width, lutTexture.height, 0, gl.RGBA, gl.FLOAT, nil)
-
-	gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, lutTexture.handle, 0)
-	gl.Clear(gl.COLOR_BUFFER_BIT)
-	gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4)
-	sys_nDrawcall++
-	gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo)
-}
 
 // ------------------------------------------------------------------
 // File I/O / SFF loader helpers and structures
@@ -4866,11 +4433,6 @@ func loadSff(filename string, char bool) (*Sff, error) {
 }
 
 // ------------------------------------------------------------------
-// Sample / example main (entry point)
-
-// (types PaletteList, Sff and Palette were moved up to the "Types" section near the top)
-
-// Or better yet, let's add proper diagnostics to your existing code:
 func main() {
 	window := initGLFW()
 	defer glfw.Terminate()
@@ -4897,9 +4459,9 @@ func main() {
 	// Process any pending GPU tasks to ensure textures are uploaded
 	sys_runMainThreadTask()
 
-	// fnt, err := loadFntV2("enter48.def", 9)
-	// fnt, err := loadFntV2("arcade.def", 9)
-	fnt, err := loadFntV2("NormalNameExtended.def", 9)
+	fnt, err := loadFntV2("enter48.def", 9)
+	fnt2, err := loadFntV2("f-6x9.def", 9)
+	fnt3, err := loadFntV2("name14.def", 9)
 	if err != nil {
 		panic(err)
 	}
@@ -4921,19 +4483,37 @@ func main() {
 	}
 
 	glfw.SwapInterval(1)
-
 	for !window.ShouldClose() {
 		glfw.PollEvents()
 		gfx.BeginFrame(true) // true to clear the frame
 		src.Draw(scr_width/2, scr_height/2, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
-		fnt.DrawText("abcdefghijklmnopqrstuvwxyz", scr_width/2, scr_height/2+80, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
-		fnt.DrawTextBatch("abcdefghijklmnopqrstuvwxyz", scr_width/2, scr_height/2+80*2, 1, 1, 0, Rotation{}, 1, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		src.Draw(scr_width/4, scr_height/2, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
+		src.Draw(scr_width/4*3, scr_height/2, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
+
+		// Normal DrawText
+		// fnt3.DrawText("Test Ikemen Rendering", scr_width/2, scr_height/4, 1, 1, 0, Rotation{}, 2, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		// fnt.DrawText("abcdefghijklm", scr_width/2, scr_height/2+80, 1, 1, 0, Rotation{}, 2, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		// fnt2.DrawText("ABCDEFGHIJKLMNOPQRSTUVWXYZ", scr_width/2, scr_height/2+80+30, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		// fnt.DrawText("nopqrstuvwxyz", scr_width/2, scr_height/2+80*2, 1, 1, 0, Rotation{}, 1, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		// fnt2.DrawText(fmt.Sprintf("DrawCall:%d FPS:%.0f", sys_nDrawcall, sys_gameFPS), scr_width/2, scr_height/2+80*2+30, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
+
+		// Batch DrawText
+		fnt3.DrawTextBatch("Test Ikemen Rendering", scr_width/2, scr_height/4, 1, 1, 0, Rotation{}, 2, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		fnt.DrawTextBatch("abcdefghijklm", scr_width/2, scr_height/2+80, 1, 1, 0, Rotation{}, 2, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		fnt2.DrawTextBatch("ABCDEFGHIJKLMNOPQRSTUVWXYZ", scr_width/2, scr_height/2+80+30, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		fnt.DrawTextBatch("nopqrstuvwxyz", scr_width/2, scr_height/2+80*2, 1, 1, 0, Rotation{}, 1, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		fnt2.DrawTextBatch(fmt.Sprintf("Draw Call:%d       FPS:%.0f", sys_nDrawcall, sys_gameFPS), scr_width/2, scr_height/2+80*2+30, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
+
 		gfx.EndFrame()
 		window.SwapBuffers()
-		// gfx.Await()
 
-		// Process GPU tasks every frame
-		// sys_runMainThreadTask()
+		// Update FPS
+		now := glfw.GetTime()
+		delta := now - sys_prevTimestamp
+		sys_prevTimestamp = now
+		if delta > 0 {
+			sys_gameFPS = float32(1.0 / delta)
+		}
 	}
 	gfx.Close()
 }
