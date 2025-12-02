@@ -1381,6 +1381,100 @@ func (f *Fnt) drawCharBatch(vertices []float32, rp RenderParams) {
 	gfx.DisableScissor()
 }
 func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation, bank, align int32, window *[4]int32, palfx *PalFX, alpha float32) {
+
+	if len(txt) == 0 || xscl == 0 || yscl == 0 {
+		return
+	}
+
+	var bt int32
+	if f.BankType == "sprite" {
+		bt = bank
+		bank = 0
+	} else if bank < 0 || len(f.palettes) <= int(bank) {
+		bank = 0
+	}
+
+	// not existing characters treated as space
+	for i, c := range txt {
+		if c != ' ' && f.images[bt][c] == nil {
+			txt = txt[:i] + string(' ') + txt[i+1:]
+		}
+	}
+
+	x += float32(f.offset[0])*xscl + float32(sys_gameWidth-320)/2
+	y += float32(f.offset[1]-int32(f.Size[1])+1)*yscl + float32(sys_gameHeight-240)
+
+	var rcx, rcy float32
+
+	if rot.IsZero() {
+		if xscl < 0 {
+			x *= -1
+		}
+		if yscl < 0 {
+			y *= -1
+		}
+		rcx, rcy = rcx*sys_widthScale, 0
+	} else {
+		rcx, rcy = (x+rcx)*sys_widthScale, y*sys_heightScale
+		x, y = AbsF(xscl)*float32(f.offset[0]), AbsF(yscl)*float32(f.offset[1])
+	}
+
+	if align == 0 {
+		x -= float32(f.TextWidth(txt, bank)) * xscl * 0.5
+	} else if align < 0 {
+		x -= float32(f.TextWidth(txt, bank)) * xscl
+	}
+
+	var pal []uint32
+	if len(f.palettes) != 0 {
+		pal = f.palettes[bank][:]
+	}
+
+	f.paltex = nil
+
+	// Set the trans type
+	tt := TT_none
+	if alpha < 1.0 {
+		tt = TT_add
+	}
+
+	alphaVal := int32(255 * sys_brightness * alpha)
+
+	// Initialize common render parameters
+	rp := RenderParams{
+		tex:            nil,
+		paltex:         nil,
+		size:           [2]uint16{0, 0},
+		x:              0,
+		y:              0,
+		tile:           notiling,
+		xts:            xscl * sys_widthScale,
+		xbs:            xscl * sys_widthScale,
+		ys:             yscl * sys_heightScale,
+		vs:             1,
+		rxadd:          rxadd,
+		xas:            1,
+		yas:            1,
+		rot:            rot,
+		tint:           0,
+		blendMode:      tt,
+		blendAlpha:     [2]int32{alphaVal, 255 - alphaVal},
+		mask:           0,
+		pfx:            palfx,
+		window:         window,
+		rcx:            rcx,
+		rcy:            rcy,
+		projectionMode: 0,
+		fLength:        0,
+		xOffset:        0,
+		yOffset:        0,
+	}
+
+	for _, c := range txt {
+		x += f.drawChar(x, y, xscl, yscl, bank, bt, c, pal, rp) + xscl*float32(f.Spacing[0])
+	}
+}
+func (f *Fnt) DrawTextBatch(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation, bank, align int32, window *[4]int32, palfx *PalFX, alpha float32) {
 	if len(txt) == 0 || xscl == 0 || yscl == 0 {
 		return
 	}
@@ -1884,18 +1978,18 @@ func (ta *TextureAtlas) AddImage(width, height int32, data []byte) ([4]float32, 
 			sampleLen = len(data)
 		}
 		// only print if it looks suspicious (all equal) or short enough to be useful
-		same := true
-		for i := 1; i < sampleLen; i++ {
-			if data[i] != data[0] {
-				same = false
-				break
-			}
-		}
-		if same {
-			log.Printf("AddImage: data sample uniform: %02x repeated (%d) first=%02x for image %dx%d at pos %d,%d", data[0], sampleLen, data[0], width, height, x, y)
-		} else {
-			log.Printf("AddImage: data sample first %d bytes: %v for image %dx%d at pos %d,%d", sampleLen, data[:sampleLen], width, height, x, y)
-		}
+		// same := true
+		// for i := 1; i < sampleLen; i++ {
+		// 	if data[i] != data[0] {
+		// 		same = false
+		// 		break
+		// 	}
+		// }
+		// if same {
+		// 	log.Printf("AddImage: data sample uniform: %02x repeated (%d) first=%02x for image %dx%d at pos %d,%d", data[0], sampleLen, data[0], width, height, x, y)
+		// } else {
+		// 	log.Printf("AddImage: data sample first %d bytes: %v for image %dx%d at pos %d,%d", sampleLen, data[:sampleLen], width, height, x, y)
+		// }
 	}
 	ta.texture.SetSubData(data, x, y, width, height)
 	return [4]float32{float32(x) / float32(ta.width), float32(y) / float32(ta.height), float32(x+width) / float32(ta.width), float32(y+height) / float32(ta.height)}, true
@@ -4192,9 +4286,11 @@ func (pl *PaletteList) NewPal() (i int, p []uint32) {
 }
 func (s *Sprite) SetPxl(px []byte) {
 	if len(px) == 0 {
+		fmt.Printf("Px Len = 0\n")
 		return
 	}
 	if int64(len(px)) != int64(s.Size[0])*int64(s.Size[1]) {
+		fmt.Printf("Invalid Px Len\n")
 		return
 	}
 	sys_mainThreadTask <- func() {
@@ -4561,6 +4657,8 @@ func (s *Sprite) readV2(f io.ReadSeeker, offset int64, datasize uint32) error {
 
 	if !isRaw {
 		s.SetPxl(px)
+	} else {
+		fmt.Printf("Format: %v\n", -s.rle)
 	}
 	return nil
 }
@@ -4610,6 +4708,7 @@ func loadSff(filename string, char bool) (*Sff, error) {
 		return binary.Read(f, binary.LittleEndian, x)
 	}
 	fmt.Printf("SFF Version: %d.%d.%d.%d\n", s.header.Ver0, s.header.Ver1, s.header.Ver2, s.header.Ver3)
+	fmt.Printf("NumberOfSprites: %v\nNumberOfPalettes: %v\n", s.header.NumberOfSprites, s.header.NumberOfPalettes)
 	if s.header.Ver0 != 1 {
 		uniquePals := make(map[[2]uint16]int)
 		for i := 0; i < int(s.header.NumberOfPalettes); i++ {
@@ -4703,6 +4802,7 @@ func loadSff(filename string, char bool) (*Sff, error) {
 				dst, src := spriteList[i], spriteList[int(indexOfPrevious)]
 				sys_mainThreadTask <- func() {
 					dst.shareCopy(src)
+					dst.UV = src.UV
 				}
 			} else {
 				spriteList[i].palidx = 0 // index out of range
@@ -4797,7 +4897,9 @@ func main() {
 	// Process any pending GPU tasks to ensure textures are uploaded
 	sys_runMainThreadTask()
 
-	fnt, err := loadFntV2("enter48.def", 9)
+	// fnt, err := loadFntV2("enter48.def", 9)
+	// fnt, err := loadFntV2("arcade.def", 9)
+	fnt, err := loadFntV2("NormalNameExtended.def", 9)
 	if err != nil {
 		panic(err)
 	}
@@ -4824,8 +4926,8 @@ func main() {
 		glfw.PollEvents()
 		gfx.BeginFrame(true) // true to clear the frame
 		src.Draw(scr_width/2, scr_height/2, 1, 1, 0, Rotation{}, sys_allPalFX, &sys_scrrect)
-		fnt.DrawText("ABCDEFGHIJKLMNOPQRSTUVWXYZ", scr_width/2, scr_height/2+80, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
-		fnt.DrawText("abcdefghijklmnopqrstuvwxyz", scr_width/2, scr_height/2+80*2, 1, 1, 0, Rotation{}, 1, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		fnt.DrawText("abcdefghijklmnopqrstuvwxyz", scr_width/2, scr_height/2+80, 1, 1, 0, Rotation{}, 0, 0, &sys_scrrect, sys_allPalFX, 1.0)
+		fnt.DrawTextBatch("abcdefghijklmnopqrstuvwxyz", scr_width/2, scr_height/2+80*2, 1, 1, 0, Rotation{}, 1, 0, &sys_scrrect, sys_allPalFX, 1.0)
 		gfx.EndFrame()
 		window.SwapBuffers()
 		// gfx.Await()
