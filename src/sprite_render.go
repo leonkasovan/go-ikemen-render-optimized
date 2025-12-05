@@ -370,8 +370,9 @@ type Renderer_GL struct {
 	postVertBuffer   uint32
 	postShaderSelect []*ShaderProgram_GL
 	// Shader and vertex data for primitive rendering
-	spriteShader *ShaderProgram_GL
-	vertexBuffer uint32
+	spriteShader      *ShaderProgram_GL
+	vertexBuffer      uint32
+	vertexBufferBatch uint32
 	// Shader and index data for 3D model rendering
 	shadowMapShader         *ShaderProgram_GL
 	modelShader             *ShaderProgram_GL
@@ -1354,25 +1355,27 @@ func (f *Fnt) drawCharBatch(vertices []float32, rp RenderParams) {
 		gfx.SetUniformFv("uvRect", []float32{0, 0, 1, 1}) // Use full texture
 
 		// Upload and render batch vertices
-		gfx.SetVertexData2(vertices)
+		gfx.SetVertexDataArray(vertices)
 
+		gfx.SetPipelineBatch()
 		// Bind the text vertex buffer for attribute pointers
-		gl.BindBuffer(gl.ARRAY_BUFFER, textVertexBuffer)
-		loc := gfx.spriteShader.a["position"]
-		gl.EnableVertexAttribArray(uint32(loc))
-		gl.VertexAttribPointerWithOffset(uint32(loc), 2, gl.FLOAT, false, 16, 0)
-		loc = gfx.spriteShader.a["uv"]
-		gl.EnableVertexAttribArray(uint32(loc))
-		gl.VertexAttribPointerWithOffset(uint32(loc), 2, gl.FLOAT, false, 16, 8)
+		// gl.BindBuffer(gl.ARRAY_BUFFER, textVertexBuffer)
+		// loc := gfx.spriteShader.a["position"]
+		// gl.EnableVertexAttribArray(uint32(loc))
+		// gl.VertexAttribPointerWithOffset(uint32(loc), 2, gl.FLOAT, false, 16, 0)
+		// loc = gfx.spriteShader.a["uv"]
+		// gl.EnableVertexAttribArray(uint32(loc))
+		// gl.VertexAttribPointerWithOffset(uint32(loc), 2, gl.FLOAT, false, 16, 8)
 
 		// Draw all triangles
-		vertexCount := int32(len(vertices) / 4) // 4 floats per vertex
-		gl.DrawArrays(gl.TRIANGLES, 0, vertexCount)
-		sys_nDrawcall++
+		// vertexCount := int32(len(vertices) / 4) // 4 floats per vertex
+		// gl.DrawArrays(gl.TRIANGLES, 0, vertexCount)
+		// sys_nDrawcall++
+		gfx.RenderQuadBatch(int32(len(vertices) / 4))
 
 		// Clean up
-		gl.DisableVertexAttribArray(uint32(gfx.spriteShader.a["position"]))
-		gl.DisableVertexAttribArray(uint32(gfx.spriteShader.a["uv"]))
+		// gl.DisableVertexAttribArray(uint32(gfx.spriteShader.a["position"]))
+		// gl.DisableVertexAttribArray(uint32(gfx.spriteShader.a["uv"]))
 
 		gfx.ReleasePipeline()
 	}
@@ -2657,7 +2660,8 @@ func (r *Renderer_GL) Init() {
 	gl.GenBuffers(1, &r.vertexBuffer)
 	gl.GenBuffers(2, &r.modelVertexBuffer[0])
 	gl.GenBuffers(2, &r.modelIndexBuffer[0])
-	gl.GenBuffers(1, &textVertexBuffer)
+	// gl.GenBuffers(1, &textVertexBuffer)
+	gl.GenBuffers(1, &r.vertexBufferBatch)
 
 	// Sprite shader
 	r.spriteShader, _ = r.newShaderProgram(vertShader, fragShader, "", "Main Shader", true)
@@ -2982,6 +2986,17 @@ func (r *Renderer_GL) SetPipeline(eq BlendEquation, src, dst BlendFunc) {
 
 	// Must bind buffer before enabling attributes
 	gl.BindBuffer(gl.ARRAY_BUFFER, r.vertexBuffer)
+	loc := r.spriteShader.a["position"]
+	gl.EnableVertexAttribArray(uint32(loc))
+	gl.VertexAttribPointerWithOffset(uint32(loc), 2, gl.FLOAT, false, 16, 0)
+	loc = r.spriteShader.a["uv"]
+	gl.EnableVertexAttribArray(uint32(loc))
+	gl.VertexAttribPointerWithOffset(uint32(loc), 2, gl.FLOAT, false, 16, 8)
+}
+
+func (r *Renderer_GL) SetPipelineBatch() {
+	// gl.BindBuffer(gl.ARRAY_BUFFER, textVertexBuffer)
+	gl.BindBuffer(gl.ARRAY_BUFFER, r.vertexBufferBatch)
 	loc := r.spriteShader.a["position"]
 	gl.EnableVertexAttribArray(uint32(loc))
 	gl.VertexAttribPointerWithOffset(uint32(loc), 2, gl.FLOAT, false, 16, 0)
@@ -3577,7 +3592,7 @@ func (r *Renderer_GL) SetVertexData(values ...float32) {
 	gl.BindBuffer(gl.ARRAY_BUFFER, r.vertexBuffer)
 	gl.BufferData(gl.ARRAY_BUFFER, len(data), unsafe.Pointer(&data[0]), gl.STATIC_DRAW)
 }
-func (r *Renderer_GL) SetVertexData2(values []float32) {
+func (r *Renderer_GL) SetVertexDataArray(values []float32) {
 	if len(values) == 0 {
 		return
 	}
@@ -3586,7 +3601,8 @@ func (r *Renderer_GL) SetVertexData2(values []float32) {
 	textVertexData = values
 
 	data := f32.Bytes(binary.LittleEndian, values...)
-	gl.BindBuffer(gl.ARRAY_BUFFER, textVertexBuffer)
+	// gl.BindBuffer(gl.ARRAY_BUFFER, textVertexBuffer)
+	gl.BindBuffer(gl.ARRAY_BUFFER, r.vertexBufferBatch)
 	gl.BufferData(gl.ARRAY_BUFFER, len(data), unsafe.Pointer(&data[0]), gl.STATIC_DRAW)
 }
 func (r *Renderer_GL) SetModelVertexData(bufferIndex uint32, values []byte) {
@@ -3603,6 +3619,10 @@ func (r *Renderer_GL) SetModelIndexData(bufferIndex uint32, values ...uint32) {
 
 func (r *Renderer_GL) RenderQuad() {
 	gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4)
+	sys_nDrawcall++
+}
+func (r *Renderer_GL) RenderQuadBatch(vertexCount int32) {
+	gl.DrawArrays(gl.TRIANGLES, 0, vertexCount)
 	sys_nDrawcall++
 }
 
